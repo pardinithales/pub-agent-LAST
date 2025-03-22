@@ -16,7 +16,20 @@ class SearchRefiner:
         self.model = "claude-3-7-sonnet-20250219"
 
     def refine_search(self, current_query, abstracts, original_query, total_results, target_results):
-        sampled_abstracts = [abstract["abstract"] for abstract in abstracts[:10]]
+        # Filtrar abstracts válidos
+        valid_abstracts = []
+        for abstract in abstracts[:10]:
+            if abstract and isinstance(abstract, dict) and "abstract" in abstract and abstract["abstract"] is not None:
+                valid_abstracts.append(abstract["abstract"])
+            else:
+                logger.warning(f"Abstract inválido ou sem conteúdo encontrado: {abstract}")
+        
+        # Se não houver abstracts válidos, retornar a query atual
+        if not valid_abstracts:
+            logger.warning("Nenhum abstract válido para refinar a busca")
+            return current_query
+        
+        sampled_abstracts = valid_abstracts
         
         system_prompt = """
         You are an expert in refining PubMed queries.
