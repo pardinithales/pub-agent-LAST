@@ -1,10 +1,8 @@
-# C:\Users\Usuario\Desktop\projetos\PUBMED_CREW\api.py
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import logging
 from dotenv import load_dotenv
 import os
-import uvicorn
 from agents.pubmed_searcher import PubmedSearcher
 from agents.search_refiner import SearchRefiner
 from agents.query_validator import validate_and_raise, QueryValidationError
@@ -17,12 +15,11 @@ for var in required_vars:
         raise ValueError(f"Variável de ambiente {var} não definida no .env")
 
 logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "DEBUG"),
+    level=os.getenv("LOG_LEVEL", "INFO"),
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
 
 app = FastAPI()
 
@@ -41,80 +38,50 @@ async def search_pubmed(request: SearchRequest):
     user_query = request.picott_text
     max_iterations = min(request.max_iterations, 5)
     max_returned_results = min(request.max_returned_results, 100)
+    target_results = request.target_results
 
-    logger.info(f"Requisição recebida - Query: '{user_query}', Max iterações: {max_iterations}, Max resultados retornados: {max_returned_results}")
+    logger.info(f"Requisição recebida - Query: '{user_query}', Target: {target_results}, Max iterações: {max_iterations}")
 
     try:
-        logger.debug("Iniciando validação da query")
         validated_query = validate_and_raise(user_query)
         logger.info(f"Query validada: '{validated_query}'")
 
         searcher = PubmedSearcher()
         refiner = SearchRefiner()
 
-        logger.debug("Iniciando busca inicial no PubMed")
+        # Busca inicial
         abstracts, pmids, total_results = searcher.search_initial(validated_query, max_returned_results)
         current_query = validated_query
 
         if not pmids:
-            logger.warning(f"Sem resultados na busca inicial - Query: '{current_query}', Total: {total_results}")
-            return {
-                "query": current_query,
-                "results": [],
-                "total_results": total_results
-            }
+            logger.warning(f"Sem resultados na busca inicial - Query: '{current_query}'")
+            return {"query": current_query, "results": [], "total_results": total_results}
 
-        logger.info(f"Busca inicial concluída - Total: {total_results}, PMIDs: {len(pmids)}")
-        for i, abstract in enumerate(abstracts, 1):
-            summary = summarize_abstract(abstract["abstract"])
-            logger.debug(f"Abstract inicial {i}/{len(abstracts)} (PMID: {abstract['pmid']}): {summary}")
+        logger.info(f"Busca inicial - Total: {total_results}, PMIDs: {len(pmids)}")
 
+        # Refinamento baseado em test_search_refiner.py
         iteration = 0
-        while iteration < max_iterations:
+        while iteration < max_iterations and (total_results < target_results / 2 or total_results > target_results * 2):
             iteration += 1
-            logger.info(f"Iteração {iteration}/{max_iterations} - Query: '{current_query}', Total: {total_results}")
-
-            logger.debug("Iniciando refinamento da query com ferramenta think")
-            previous_query = current_query
-            refined_query = refiner.refine_search(
-                current_query, 
-                abstracts, 
-                user_query, 
-                total_results, 
-                request.target_results
-            )
-            logger.info(f"Query refinada: '{refined_query}'")
+            logger.info(f"Iteração {iteration}/{max_iterations} - Total: {total_results}")
+            refined_query = refiner.refine_search(current_query, abstracts, user_query, total_results, target_results)
 
             if refined_query == current_query:
-                logger.info(f"Query estabilizada na iteração {iteration} - Total: {total_results}")
+                logger.info(f"Query estabilizada na iteração {iteration}")
                 break
 
             current_query = refined_query
-            logger.debug(f"Iniciando busca refinada - Query: '{current_query}'")
             abstracts, pmids, total_results = searcher.search_refined(current_query, abstracts, max_returned_results)
-            logger.info(f"Busca refinada concluída - Total: {total_results}, PMIDs: {len(pmids)}")
+            logger.info(f"Busca refinada - Total: {total_results}, PMIDs: {len(pmids)}")
 
-            for i, abstract in enumerate(abstracts, 1):
-                summary = summarize_abstract(abstract["abstract"])
-                logger.debug(f"Abstract refinado {i}/{len(abstracts)} (PMID: {abstract['pmid']}): {summary}")
-
-        # Busca final com total correto e mais abstracts
-        logger.debug(f"Buscando até {max_returned_results} abstracts para a resposta final")
-        total_results = searcher.api.count_results(current_query)  # Garante o total real
+        # Resultado final
+        total_results = searcher.api.count_results(current_query)
         final_pmids = searcher.api.esearch(current_query, retmax=max_returned_results)
         final_abstracts = searcher.api.efetch_abstracts(final_pmids)
-        results = [{"pmid": abstract["pmid"], "abstract": abstract["abstract"]} for abstract in final_abstracts]
+        results = [{"pmid": abstract["pmid"], "abstract": summarize_abstract(abstract["abstract"])} for abstract in final_abstracts]
 
-        logger.info(f"Busca finalizada - Query final: '{current_query}', Total: {total_results}, Resultados retornados: {len(results)}")
-        for i, result in enumerate(results, 1):
-            summary = summarize_abstract(result["abstract"])
-            logger.debug(f"Resultado final {i}/{len(results)} (PMID: {result['pmid']}): {summary}")
-
-        return {
-            "query": current_query,
-            "results": results,
-            "total_results": total_results
-        }
+        logger.info(f"Busca finalizada - Query: '{current_query}', Total: {total_results}, Retornados: {len(results)}")
+        return {"query": current_query, "results": results, "total_results": total_results}
 
     except QueryValidationError as e:
         logger.error(f"Erro na validação da query: {str(e)}")
@@ -125,5 +92,4 @@ async def search_pubmed(request: SearchRequest):
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
-    logger.info(f"Iniciando Uvicorn na porta {port}")
-    uvicorn.run(app, host="0.0.0.0", port=port, reload=True)
+    uvicorn.run(app, host="0.0.0.0", port=port)
